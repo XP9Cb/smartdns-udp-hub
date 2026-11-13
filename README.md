@@ -1,3 +1,5 @@
+<img width="1359" height="685" alt="image" src="https://github.com/user-attachments/assets/3101c033-4d8d-4384-8191-dfd51a7d9140" />
+<img width="1359" height="693" alt="image" src="https://github.com/user-attachments/assets/e4fb1786-cc91-4b17-a1c3-66753d5adcc1" />
 # ⚡ SmartDNS & UDP Hub
 
 Легковесный SmartDNS-сервер на базе `dnsmasq` и `sniproxy` с веб-панелью управления, пробросом UDP-портов (`iptables NAT`) и системой персональных DDNS-токенов для автоматического обновления IP клиентов.
