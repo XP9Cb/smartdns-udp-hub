@@ -1,5 +1,4 @@
-<img width="1359" height="693" alt="image" src="https://github.com/user-attachments/assets/e4fb1786-cc91-4b17-a1c3-66753d5adcc1" />
-<img width="1359" height="685" alt="image" src="https://github.com/user-attachments/assets/3101c033-4d8d-4384-8191-dfd51a7d9140" />
+<img width="1401" height="1437" alt="Безымянный3" src="https://github.com/user-attachments/assets/f875b247-1cb6-4743-9950-23b1ded65cff" />
 
 # ⚡ SmartDNS & UDP Hub
 
