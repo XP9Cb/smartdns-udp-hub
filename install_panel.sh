@@ -166,7 +166,7 @@ with open(cfg_path, "w", encoding="utf-8") as f:
 '
 
 cat << 'EOF' > /opt/smartdns/app.py
-import os, json, subprocess, shutil, threading, secrets
+import os, re, json, subprocess, shutil, threading, secrets
 from functools import wraps
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, Response
 
@@ -236,6 +236,93 @@ def extract_ips(raw_list):
         if ip:
             clean.append(ip)
     return list(dict.fromkeys(clean))
+
+def get_ip_labels(raw_list):
+    labels = {}
+    for item in raw_list:
+        if "#" in item:
+            ip_part, comment_part = item.split("#", 1)
+            ip = ip_part.strip()
+            label = comment_part.strip()
+            if ip and label:
+                labels[ip] = label
+    return labels
+
+def is_domain_proxied(domain, cfg):
+    if cfg.get("wildcard_mode", False):
+        return True
+    d_low = domain.lower().rstrip(".")
+    for rule_d in cfg.get("domains", []):
+        r = rule_d.strip().lstrip("*.").lower()
+        if r and (d_low == r or d_low.endswith("." + r)):
+            return True
+    return False
+
+def parse_dns_logs(cfg):
+    try:
+        raw = subprocess.check_output(
+            ["journalctl", "-u", "dnsmasq", "-n", "250", "-o", "short", "--no-pager"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        return [], f"Ошибка чтения логов: {e}"
+
+    ip_labels = get_ip_labels(cfg.get("allowed_ips", []))
+    ext_ip = cfg.get("ext_ip", "")
+    entries = []
+    pending_a = {}
+
+    q_re = re.compile(r"^[A-Za-z]+\s+\d+\s+(\d{2}:\d{2}:\d{2})\s+\S+\s+dnsmasq\[\d+\]:\s+query\[(A|AAAA|HTTPS)\]\s+(\S+)\s+from\s+(\S+)")
+    cfg_re = re.compile(r"dnsmasq\[\d+\]:\s+config\s+(\S+)\s+is\s+(\S+)")
+    ans_re = re.compile(r"dnsmasq\[\d+\]:\s+(?:reply|cached)\s+(\S+)\s+is\s+(\d+\.\d+\.\d+\.\d+)")
+    fwd_re = re.compile(r"dnsmasq\[\d+\]:\s+forwarded\s+(\S+)\s+to\s+(\S+)")
+
+    for line in raw.splitlines():
+        m_q = q_re.search(line)
+        if m_q:
+            ts, qtype, domain, client_ip = m_q.groups()
+            if qtype == "AAAA" and cfg.get("block_ipv6", True):
+                continue
+            client_name = "Тест панели" if client_ip == "127.0.0.1" else ip_labels.get(client_ip, "")
+            proxied = is_domain_proxied(domain, cfg)
+            item = {
+                "time": ts,
+                "ip": client_ip,
+                "name": client_name,
+                "domain": domain,
+                "qtype": qtype,
+                "route": "proxy" if proxied else "direct",
+                "target": ext_ip if proxied else ""
+            }
+            entries.append(item)
+            pending_a[domain] = item
+            continue
+
+        m_cfg = cfg_re.search(line)
+        if m_cfg:
+            domain, target = m_cfg.groups()
+            if domain in pending_a and target == ext_ip:
+                pending_a[domain]["route"] = "proxy"
+                pending_a[domain]["target"] = target
+            continue
+
+        m_ans = ans_re.search(line)
+        if m_ans:
+            domain, target_ip = m_ans.groups()
+            if domain in pending_a and pending_a[domain]["route"] != "proxy":
+                pending_a[domain]["route"] = "direct"
+                pending_a[domain]["target"] = target_ip
+            continue
+
+        m_fwd = fwd_re.search(line)
+        if m_fwd:
+            domain, _ = m_fwd.groups()
+            if domain in pending_a and pending_a[domain]["route"] != "proxy":
+                pending_a[domain]["route"] = "direct"
+            continue
+
+    entries.reverse()
+    return entries[:80], raw
 
 def resolve_real_ip(domain):
     try:
@@ -338,6 +425,11 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartDNS & UDP Control Panel</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      .log-row { border-bottom: 1px solid #262a30; padding: 6px 8px; transition: background 0.15s; }
+      .log-row:hover { background: #1c2026; }
+      .log-row:last-child { border-bottom: none; }
+    </style>
 </head>
 <body class="bg-dark text-light">
 <nav class="navbar navbar-expand-lg navbar-dark bg-black border-bottom border-secondary mb-4">
@@ -519,7 +611,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-body">
           <form method="post" action="{{ url_for('update_domains') }}">
-            <textarea name="domains" class="form-control font-monospace mb-2" rows="13" {% if cfg.wildcard_mode %}disabled{% endif %}>{{ '\\n'.join(cfg.domains) }}</textarea>
+            <textarea name="domains" class="form-control font-monospace mb-2" rows="11" {% if cfg.wildcard_mode %}disabled{% endif %}>{{ '\\n'.join(cfg.domains) }}</textarea>
             {% if cfg.wildcard_mode %}
               <div class="text-warning small mb-2">Включен режим «Весь трафик». Список доменов временно игнорируется.</div>
             {% endif %}
@@ -539,15 +631,53 @@ HTML_TEMPLATE = """
       </div>
 
       <div class="card bg-black border-secondary">
-        <div class="card-header border-secondary d-flex justify-content-between align-items-center gap-2">
-          <h6 class="mb-0">DNS-запросы (Live Log)</h6>
+        <div class="card-header border-secondary d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <div class="d-flex align-items-center gap-2">
+            <h6 class="mb-0">DNS-запросы (Live Log)</h6>
+            <button type="button" id="toggleLogModeBtn" class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="toggleLogView()">Сырой лог</button>
+          </div>
           <div class="d-flex gap-2">
-            <input type="text" id="logFilter" class="form-control form-control-sm" style="width: 170px;" placeholder="Фильтр (напр. gemini)" onkeyup="filterLogs()">
+            <input type="text" id="logFilter" class="form-control form-control-sm" style="width: 195px;" placeholder="Фильтр (имя, сайт, прокси)" onkeyup="filterLogs()">
             <a href="{{ url_for('index') }}" class="btn btn-sm btn-outline-light">Обновить</a>
           </div>
         </div>
         <div class="card-body p-2">
-          <pre id="logBox" class="bg-dark text-success p-2 mb-0 font-monospace small" style="max-height: 290px; overflow-y: auto;">{{ logs }}</pre>
+          <!-- Наглядный цветной лог -->
+          <div id="visualLogBox" class="bg-dark rounded border border-secondary-subtle font-monospace small" style="max-height: 340px; overflow-y: auto;">
+            {% if log_entries %}
+              {% for e in log_entries %}
+                <div class="log-row d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="text-secondary" style="font-size: 0.78rem;">{{ e.time }}</span>
+                    {% if e.name %}
+                      <span class="badge bg-info text-dark">👤 {{ e.name }}</span>
+                      <span class="text-secondary" style="font-size: 0.75rem;">{{ e.ip }}</span>
+                    {% else %}
+                      <span class="badge bg-secondary">🌐 {{ e.ip }}</span>
+                    {% endif %}
+                    <span class="text-light fw-bold">{{ e.domain }}</span>
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    {% if e.route == 'proxy' %}
+                      <span class="badge bg-success">🟢 ЧЕРЕЗ ПРОКСИ</span>
+                      <span class="text-success-emphasis" style="font-size: 0.75rem;">➔ {{ e.target }}</span>
+                    {% else %}
+                      <span class="badge bg-primary bg-opacity-75">🔵 НАПРЯМУЮ</span>
+                      {% if e.target %}
+                        <span class="text-secondary" style="font-size: 0.75rem;">➔ {{ e.target }}</span>
+                      {% endif %}
+                    {% endif %}
+                  </div>
+                </div>
+              {% endfor %}
+              <div id="noFilterMatches" class="p-3 text-center text-secondary" style="display: none;">По вашему фильтру совпадений не найдено.</div>
+            {% else %}
+              <div class="p-3 text-center text-secondary">Записей пока нет. Убедитесь, что включён переключатель «Вести живой лог DNS-запросов».</div>
+            {% endif %}
+          </div>
+
+          <!-- Сырой лог (скрыт по умолчанию) -->
+          <pre id="rawLogBox" class="bg-dark text-success p-2 mb-0 font-monospace small" style="max-height: 340px; overflow-y: auto; display: none;">{{ raw_logs }}</pre>
         </div>
       </div>
     </div>
@@ -555,16 +685,41 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
-const rawLogs = document.getElementById('logBox').innerText;
+const rawLogsText = document.getElementById('rawLogBox').innerText;
+let isRawMode = false;
+
+function toggleLogView() {
+  isRawMode = !isRawMode;
+  document.getElementById('visualLogBox').style.display = isRawMode ? 'none' : 'block';
+  document.getElementById('rawLogBox').style.display = isRawMode ? 'block' : 'none';
+  document.getElementById('toggleLogModeBtn').innerText = isRawMode ? 'Наглядный лог' : 'Сырой лог';
+  filterLogs();
+}
+
 function filterLogs() {
   const q = document.getElementById('logFilter').value.toLowerCase();
-  if (!q) {
-    document.getElementById('logBox').innerText = rawLogs;
+  if (isRawMode) {
+    if (!q) {
+      document.getElementById('rawLogBox').innerText = rawLogsText;
+      return;
+    }
+    const filtered = rawLogsText.split('\\n').filter(line => line.toLowerCase().includes(q)).join('\\n');
+    document.getElementById('rawLogBox').innerText = filtered || 'Совпадений не найдено.';
     return;
   }
-  const filtered = rawLogs.split('\\n').filter(line => line.toLowerCase().includes(q)).join('\\n');
-  document.getElementById('logBox').innerText = filtered || 'Совпадений не найдено.';
+  const rows = document.querySelectorAll('#visualLogBox .log-row');
+  let visible = 0;
+  rows.forEach(row => {
+    const match = row.innerText.toLowerCase().includes(q);
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  const emptyMsg = document.getElementById('noFilterMatches');
+  if (emptyMsg) {
+    emptyMsg.style.display = (visible === 0 && rows.length > 0) ? 'block' : 'none';
+  }
 }
+
 function copyText(text, btn) {
   const done = () => {
     const old = btn.innerText;
@@ -656,7 +811,7 @@ def ddns_webhook(token):
         apply_async()
         return f"OK: {ip} ({tag})\n", 200
 
-    return f"UNCHANGED: {ip} ({tag})\n", 200
+    return f"UNCHANGED: {ip}\n", 200
 
 @app.route("/")
 @login_required
@@ -665,13 +820,10 @@ def index():
     client_ip = request.remote_addr
     dns_ok = subprocess.run(["systemctl", "is-active", "--quiet", "dnsmasq"]).returncode == 0
     sni_ok = subprocess.run(["systemctl", "is-active", "--quiet", "sniproxy"]).returncode == 0
-    try:
-        logs = subprocess.check_output(["journalctl", "-u", "dnsmasq", "-n", "60", "--no-pager"], text=True)
-    except Exception:
-        logs = "Логи недоступны."
+    log_entries, raw_logs = parse_dns_logs(cfg)
     return render_template_string(
         HTML_TEMPLATE, cfg=cfg, client_ip=client_ip,
-        dns_ok=dns_ok, sni_ok=sni_ok, logs=logs
+        dns_ok=dns_ok, sni_ok=sni_ok, log_entries=log_entries, raw_logs=raw_logs
     )
 
 @app.route("/add_token", methods=["POST"])
