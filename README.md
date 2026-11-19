@@ -25,7 +25,7 @@
 Подключитесь к новому серверу по SSH и выполните одну команду:
 
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/install_panel.sh](https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/install_panel.sh) | tr -d '\r' > install_panel.sh && sudo bash install_panel.sh
+curl -fsSL https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/install_panel.sh https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/install_panel.sh | tr -d '\r' > install_panel.sh && sudo bash install_panel.sh
 ```
 
 Во время установки скрипт предложит задать пароль для входа в веб-панель (если просто нажать `Enter`, установится `dns2026`).
@@ -38,7 +38,7 @@ curl -fsSL [https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/instal
 Чтобы обновить веб-панель и системные службы до последней версии с сохранением пароля, белого списка IP, доменов и DDNS-токенов, выполните на сервере:
 
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/update.sh](https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/update.sh) | tr -d '\r' | sudo bash
+curl -fsSL https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/update.sh https://raw.githubusercontent.com/XP9Cb/smartdns-udp-hub/main/update.sh | tr -d '\r' | sudo bash
 ```
 
 ## Настройка клиентов
